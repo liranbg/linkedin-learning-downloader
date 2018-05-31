@@ -20,7 +20,14 @@ Make sure your LinkedIn account is **NOT** protected with 2FA
 #### Usage
 > pip install -r requirements.txt
 
-Edit config.py file (username, password and courses)  
+Edit config.py file (username, password and courses slugs)  
+
+```Course's slug can be obtained using its url
+e.g:
+COURSE URL: https://www.linkedin.com/learning/python-advanced-design-pattern
+->
+SLUG: python-advanced-design-pattern
+```
 
 > python linkedin_learning.py
 

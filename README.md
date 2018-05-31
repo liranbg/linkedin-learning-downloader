@@ -4,6 +4,11 @@
 
 Asynchronous scraping tool to fetch LinkedIn-learning's courses videos.
 
+Dependencies:
+- Python 3.6
+- aiohttp
+- lxml
+
 #### Info
 
 Please use this script for your own purposes.

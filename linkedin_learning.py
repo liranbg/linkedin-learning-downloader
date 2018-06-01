@@ -6,7 +6,7 @@ import re
 import os
 import logging
 
-from itertools import chain, filterfalse
+from itertools import chain, filterfalse, starmap
 from collections import namedtuple
 from urllib.parse import urljoin
 from config import USERNAME, PASSWORD, COURSES, PROXY, BASE_DOWNLOAD_PATH
@@ -20,11 +20,19 @@ HEADERS = {
 }
 URL = "https://www.linkedin.com"
 FILE_TYPE_VIDEO = ".mp4"
+FILE_TYPE_SUBTITLE = ".srt"
 COOKIE_JAR = aiohttp.cookiejar.CookieJar()
 
 Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters"])
 Chapter = namedtuple("Chapter", ["name", "videos", "index"])
 Video = namedtuple("Video", ["name", "slug", "index", "filename"])
+
+
+def sub_format_time(ms):
+    seconds, milliseconds = divmod(ms, 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f'{hours:02}:{minutes:02}:{seconds:02},{milliseconds:02}'
 
 
 def clean_dir_name(dir_name):
@@ -131,19 +139,53 @@ def fetch_chapter(course: Course, chapter: Chapter):
 
 
 async def fetch_video(course: Course, chapter: Chapter, video: Video):
-    path = os.path.join(chapter_dir(course, chapter), video.filename)
-    if os.path.exists(path):
+    subtitles_filename = os.path.splitext(video.filename)[0] + FILE_TYPE_SUBTITLE
+    video_file_path = os.path.join(chapter_dir(course, chapter), video.filename)
+    subtitle_file_path = os.path.join(chapter_dir(course, chapter), subtitles_filename)
+    video_exists = os.path.exists(video_file_path)
+    subtitle_exists = os.path.exists(subtitle_file_path)
+    if video_exists and subtitle_exists:
         return
 
     logging.info(f"[~] Fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
         video_url = f'{URL}/learning-api/detailedCourses?addParagraphsToTranscript=false&courseSlug={course.slug}&' \
                     f'q=slugs&resolution=_720&videoSlug={video.slug}'
-        resp = await session.get(video_url, proxy=PROXY, headers=HEADERS)
-        data = await resp.json()
-        download_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
-        await download_file(download_url, path)
+        data = None
+        tries = 3
+        for _ in range(tries):
+            try:
+                resp = await session.get(video_url, proxy=PROXY, headers=HEADERS)
+                data = await resp.json()
+                resp.raise_for_status()
+                break
+            except aiohttp.client_exceptions.ClientResponseError:
+                pass
+
+        video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
+        subtitles = data['elements'][0]['selectedVideo']['transcript']['lines']
+        duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
+
+        if not video_exists:
+            await download_file(video_url, video_file_path)
+
+        await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
+
     logging.info(f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
+
+
+async def write_subtitles(subs, output_path, video_duration):
+    def subs_to_lines(idx, sub):
+        starts_at = sub['transcriptStartAt']
+        ends_at = subs[idx]['transcriptStartAt'] if idx < len(subs) else video_duration
+        caption = sub['caption']
+        return f"{idx}\n" \
+               f"{sub_format_time(starts_at)} --> {sub_format_time(ends_at)}\n" \
+               f"{caption}\n\n"
+
+    with open(output_path, 'wb') as f:
+        for line in starmap(subs_to_lines, enumerate(subs, start=1)):
+            f.write(line.encode('utf8'))
 
 
 async def download_file(url, output):

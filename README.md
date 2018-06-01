@@ -33,7 +33,7 @@ SLUG: python-advanced-design-pattern
 
 #### TODO
 
- - Add Subtitles
+ - ~~Add Subtitles~~
  - Add Description
  - Use argparser
  - Fetch courses from bookmarks

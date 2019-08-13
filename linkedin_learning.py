@@ -13,7 +13,7 @@ from config import USERNAME, PASSWORD, COURSES, PROXY, BASE_DOWNLOAD_PATH
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
 
-
+MAX_DOWNLOADS_SEMAPHORE = asyncio.Semaphore(10)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36",
     "Accept": "*/*",
@@ -77,8 +77,6 @@ async def login(username, password):
         resp = await session.get(URL, proxy=PROXY)
         body = await resp.text()
 
-        logging.info(body)
-
         # Looking for CSRF Token
         html = lxml.html.fromstring(body)
         csrf = html.xpath("//input[@name='loginCsrfParam']/@value").pop()
@@ -113,13 +111,10 @@ async def fetch_course(course_slug):
         data = await resp.json()
         course = build_course(data['elements'][0])
 
-        logging.info(f'[*] Access to {course.name} is {"GRANTED" if course.unlocked else "DENIED"}')
-        #if not course.unlocked:
-            # Nothing to do here
-            #return
+        logging.info(f'[*] Fetching course {course.name}')
 
         await fetch_chapters(course)
-        logging.info(f'[*] Finished  fetching course "{course.name}"')
+        logging.info(f'[*] Finished fetching course "{course.name}"')
 
 
 async def fetch_chapters(course: Course):
@@ -135,10 +130,13 @@ async def fetch_chapters(course: Course):
 
 def fetch_chapter(course: Course, chapter: Chapter):
     return (
-        fetch_video(course, chapter, video)
+        fetch_video_or_wait(course, chapter, video)
         for video in chapter.videos
     )
 
+async def fetch_video_or_wait(course: Course, chapter: Chapter, video: Video):
+    async with MAX_DOWNLOADS_SEMAPHORE:
+        await fetch_video(course, chapter, video)
 
 async def fetch_video(course: Course, chapter: Chapter, video: Video):
     subtitles_filename = os.path.splitext(video.filename)[0] + FILE_TYPE_SUBTITLE
@@ -165,13 +163,17 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
                 pass
 
         video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
-        #subtitles = data['elements'][0]['selectedVideo']['transcript']['lines']
+        subtitles = data['elements'][0]['selectedVideo']['transcript']  # transcript is empty when no subtitles available
         duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
         if not video_exists:
+            logging.info(f"[~] Writing {video.filename}")
             await download_file(video_url, video_file_path)
 
-        #await write_subtitles(subtitles, subtitle_file_path, duration_in_ms)
+        if subtitles is not None:
+            logging.info(f"[~] Writing {subtitles_filename}")
+            subtitle_lines = subtitles['lines']            
+            await write_subtitles(subtitle_lines, subtitle_file_path, duration_in_ms)
 
     logging.info(f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
 

@@ -163,7 +163,11 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
                 pass
 
         video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
-        subtitles = data['elements'][0]['selectedVideo']['transcript']  # transcript is empty when no subtitles available
+        
+        try:
+            subtitles = data['elements'][0]['selectedVideo']['transcript']
+        except Exception as e:
+            subtitles = None
         duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
         if not video_exists:

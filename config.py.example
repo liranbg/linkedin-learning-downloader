@@ -1,3 +1,5 @@
+# copy this file as `config.py`
+
 import os
 
 # EDIT

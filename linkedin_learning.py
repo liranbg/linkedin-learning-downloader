@@ -19,13 +19,16 @@ HEADERS = {
     "Accept": "*/*",
 }
 URL = "https://www.linkedin.com"
+LOGIN_URL = f"{URL}/login"
 FILE_TYPE_VIDEO = ".mp4"
 FILE_TYPE_SUBTITLE = ".srt"
 COOKIE_JAR = aiohttp.cookiejar.CookieJar()
+EXERCISE_FOLDER_PATH = "exercises"
 
-Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters"])
+Course = namedtuple("Course", ["name", "slug", "description", "unlocked", "chapters", "exercises"])
 Chapter = namedtuple("Chapter", ["name", "videos", "index"])
 Video = namedtuple("Video", ["name", "slug", "index", "filename"])
+Exercise = namedtuple("Exercise", ["name", "url", "course", "index"])
 
 
 def sub_format_time(ms):
@@ -45,23 +48,31 @@ def clean_dir_name(dir_name):
 
 def build_course(course_element: dict):
     chapters = [
-        Chapter(name=course['title'],
+        Chapter(name=chapter['title'],
                 videos=[
                     Video(name=video['title'],
                           slug=video['slug'],
                           index=idx,
                           filename=f"{str(idx).zfill(2)} - {clean_dir_name(video['title'])}{FILE_TYPE_VIDEO}"
                           )
-                    for idx, video in enumerate(course['videos'], start=1)
+                    for idx, video in enumerate(chapter['videos'], start=1)
                 ],
                 index=idx)
-        for idx, course in enumerate(course_element['chapters'], start=1)
+        for idx, chapter in enumerate(course_element['chapters'], start=1)
+    ]
+    exercises = [
+        Exercise(name=exercise['name'],
+                url=exercise['url'],
+                course=course_element['title'],
+                index=idx)
+        for idx, exercise in enumerate(course_element['exerciseFiles'], start=1)
     ]
     course = Course(name=course_element['title'],
                     slug=course_element['slug'],
                     description=course_element['description'],
                     unlocked=course_element['fullCourseUnlocked'],
-                    chapters=chapters)
+                    chapters=chapters,
+                    exercises=exercises)
     return course
 
 
@@ -71,10 +82,16 @@ def chapter_dir(course: Course, chapter: Chapter):
     return chapter_path
 
 
+def exercises_dir(exercise: Exercise):
+    folder_name = EXERCISE_FOLDER_PATH
+    exercise_path = os.path.join(BASE_DOWNLOAD_PATH, clean_dir_name(exercise.course), folder_name)
+    return exercise_path
+
+
 async def login(username, password):
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
         logging.info("[*] Login step 1 - Getting CSRF token...")
-        resp = await session.get(URL, proxy=PROXY)
+        resp = await session.get(LOGIN_URL, proxy=PROXY)
         body = await resp.text()
 
         # Looking for CSRF Token
@@ -114,6 +131,7 @@ async def fetch_course(course_slug):
         logging.info(f'[*] Fetching course {course.name}')
 
         await fetch_chapters(course)
+        await fetch_exercises(course)
         logging.info(f'[*] Finished fetching course "{course.name}"')
 
 
@@ -128,15 +146,34 @@ async def fetch_chapters(course: Course):
     await asyncio.gather(*chain.from_iterable(fetch_chapter(course, chapter) for chapter in course.chapters))
 
 
+async def fetch_exercises(course: Course):
+    if len(course.exercises) == 0:
+        return
+
+    # Creating the missing directory
+    exercise_dir = exercises_dir(course.exercises[0])
+    if not os.path.exists(exercise_dir):
+        os.makedirs(exercise_dir)
+
+    return await asyncio.gather(*map(fetch_zip_or_wait, course.exercises))
+
+
 def fetch_chapter(course: Course, chapter: Chapter):
     return (
         fetch_video_or_wait(course, chapter, video)
         for video in chapter.videos
     )
 
+
 async def fetch_video_or_wait(course: Course, chapter: Chapter, video: Video):
     async with MAX_DOWNLOADS_SEMAPHORE:
         await fetch_video(course, chapter, video)
+
+
+async def fetch_zip_or_wait(exercise: Exercise):
+    async with MAX_DOWNLOADS_SEMAPHORE:
+        await fetch_zip(exercise)
+
 
 async def fetch_video(course: Course, chapter: Chapter, video: Video):
     subtitles_filename = os.path.splitext(video.filename)[0] + FILE_TYPE_SUBTITLE
@@ -161,12 +198,12 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
                 break
             except aiohttp.client_exceptions.ClientResponseError:
                 pass
-
-        video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
         
         try:
             subtitles = data['elements'][0]['selectedVideo']['transcript']
-        except Exception as e:
+            # This throws exception if the course is locked for the user as url is not available
+            video_url = data['elements'][0]['selectedVideo']['url']['progressiveUrl']
+        except Exception:
             subtitles = None
         duration_in_ms = int(data['elements'][0]['selectedVideo']['durationInSeconds']) * 1000
 
@@ -182,6 +219,17 @@ async def fetch_video(course: Course, chapter: Chapter, video: Video):
     logging.info(f"[~] Done fetching course '{course.name}' Chapter no. {chapter.index} Video no. {video.index}")
 
 
+async def fetch_zip(exercise: Exercise):
+    zip_file_path = os.path.join(exercises_dir(exercise), f"{str(exercise.index).zfill(2)} - {exercise.name}")
+    zip_exists = os.path.exists(zip_file_path)
+    if zip_exists:
+        return
+
+    logging.info(f"[~] Fetching zip '{exercise.name}' Exercise no. {exercise.index}")
+    await download_file(exercise.url, zip_file_path)
+    logging.info(f"[~] Done fetching zip '{exercise.name}' Exercise no. {exercise.index}")
+
+
 async def write_subtitles(subs, output_path, video_duration):
     def subs_to_lines(idx, sub):
         starts_at = sub['transcriptStartAt']
@@ -195,10 +243,11 @@ async def write_subtitles(subs, output_path, video_duration):
         for line in starmap(subs_to_lines, enumerate(subs, start=1)):
             f.write(line.encode('utf8'))
 
+timeout = aiohttp.ClientTimeout(total = 60*60)
 
 async def download_file(url, output):
     async with aiohttp.ClientSession(headers=HEADERS, cookie_jar=COOKIE_JAR) as session:
-        async with session.get(url, proxy=PROXY, headers=HEADERS) as r:
+        async with session.get(url, proxy=PROXY, headers=HEADERS, timeout=timeout) as r:
             try:
                 with open(output, 'wb') as f:
                     while True:
@@ -232,3 +281,4 @@ async def process():
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     loop.run_until_complete(process())
+    loop.close()
